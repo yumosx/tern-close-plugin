@@ -20,7 +20,7 @@ Every row is hidden while it would close nothing, so the palette only offers a c
 ## Install
 
 ```sh
-tern plugin link ~/src/tern-close-plugin
+tern plugin install github.com/yumosx/tern-close-plugin
 tern plugin list
 ```
 
@@ -28,7 +28,12 @@ tern plugin list
 close-tab 0.1.0 Close Tab — 0 blocks, 0 lenses, window  ready
 ```
 
-A running daemon reloads the plugin on `link`, and again about 300 ms after you save a file in the folder. `tern plugin reload` forces it and exits 1 when a plugin failed or a folder has problems.
+`install` clones the repo into Tern's plugins directory, and a running daemon reloads it there. `tern plugin remove close-tab` deletes the copy. `--force` replaces an installed copy after an update, and never a linked one.
+
+Working from a checkout instead: `tern plugin link ~/src/tern-close-plugin` uses the plugin where it is, and the daemon reloads again about 300 ms after you save a file in the folder. `tern plugin unlink close-tab` drops the link.
+
+`tern plugin reload` forces a reload and exits 1 when a plugin failed or the folder has problems.
+*** END
 
 ## Key bindings
 
