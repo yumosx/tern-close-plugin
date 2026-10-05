@@ -1,3 +1,0 @@
---!strict
--- Host half: runs in the session daemon. Nothing to hook yet, so this is a
--- no-op. No [[lenses]] in plugin.toml either: closing a tab is a window job.
