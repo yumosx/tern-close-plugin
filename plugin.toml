@@ -1,0 +1,7 @@
+schema = 1
+id = "close-tab"
+name = "Close Tab"
+version = "0.1.0"
+description = "Close other tabs and other blocks from the command palette."
+host = "host.luau"
+window = "window.luau"
