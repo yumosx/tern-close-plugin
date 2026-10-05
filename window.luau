@@ -1,13 +1,17 @@
 --!strict
--- Window half: close commands. Tabs and splits are window state, so they live
--- here; a block (host half) has no cx.layout and cannot close anything.
+-- Window half: eight close commands. Tabs and splits are window state, so they
+-- live here; a block (host half) has no cx.layout and cannot close anything.
+--
+-- Every command is one `close_command` whose `targets` both decides whether
+-- the row shows and names what to close, so the two can't drift apart.
 
+-- The focused block and the tab holding it: what "others" is relative to.
 local function keeper(cx: WindowCx): (number?, number?)
 	local pane = cx.session:focused()
 	return pane, (if pane then cx.session:tab_of(pane) else nil)
 end
 
--- The current session's id, so close commands stay inside one session.
+-- The current session's id, so tab commands stay inside one session.
 local function session_id(cx: WindowCx): number?
 	for _, s in cx.session:sessions() do
 		if s.current then
@@ -17,39 +21,85 @@ local function session_id(cx: WindowCx): number?
 	return nil
 end
 
-local function report(cx: WindowCx, title: string, closed: number)
-	cx:toast("info", title, string.format("closed %d block(s)", closed))
-end
-
-local function close_panes(cx: WindowCx, panes: { any }, skip: number, tab: number?): number
-	local closed = 0
-	for _, p in panes do
-		if p.pane ~= skip and (tab == nil or p.tab == tab) then
-			cx.layout:close(p.pane)
-			closed += 1
+-- A session's tabs are one ordered list, however the tab bar is drawn, so
+-- tabs only have "left" and "right": the ones before the focused block's and
+-- the ones after it.
+local function side_tabs(cx: WindowCx, dir: string): { number }
+	local _, keep = keeper(cx)
+	if not keep then
+		return {}
+	end
+	local tabs = cx.session:tabs()
+	local session, here = nil, nil
+	for _, t in tabs do
+		if t.id == keep then
+			session, here = t.session, t.position
 		end
 	end
-	return closed
+	if not here then
+		return {}
+	end
+	-- Positions are per session, so only tabs of this session compare.
+	local before = dir == "left"
+	local ids = {}
+	for _, t in tabs do
+		if t.session == session and t.id ~= keep and (t.position < here) == before then
+			table.insert(ids, t.id)
+		end
+	end
+	return ids
+end
+
+-- Every tab of the focused block's session except its own.
+local function other_tabs(cx: WindowCx): { number }
+	local _, keep = keeper(cx)
+	if not keep then
+		return {}
+	end
+	local session = session_id(cx)
+	local ids = {}
+	for _, t in cx.session:tabs() do
+		if t.session == session and t.id ~= keep then
+			table.insert(ids, t.id)
+		end
+	end
+	return ids
+end
+
+-- The panes of those tabs, in one pass over the window's panes.
+local function panes_of(cx: WindowCx, tabs: { number }): { number }
+	local wanted = {}
+	for _, id in tabs do
+		wanted[id] = true
+	end
+	local ids = {}
+	for _, p in cx.session:panes() do
+		if p.tab ~= nil and wanted[p.tab] then
+			table.insert(ids, p.pane)
+		end
+	end
+	return ids
 end
 
 -- Split trees come back as nested tables, so walk them as `any`.
 type Step = { axis: string, side: number }
 type Leaf = { pane: number, path: { Step } }
 
-local function walk(node: any, path: { Step }, out: { Leaf })
+-- One clone per leaf, not one per level: the stack is reused down the tree.
+local function walk(node: any, stack: { Step }, out: { Leaf })
 	if not node then
 		return
 	end
 	if node.pane then
-		table.insert(out, { pane = node.pane, path = path })
+		table.insert(out, { pane = node.pane, path = table.clone(stack) })
 		return
 	end
 	if node.split == "right" or node.split == "down" then
-		for side = 1, 2 do
-			local next_path = table.clone(path)
-			table.insert(next_path, { axis = node.split, side = side })
-			walk(node[side], next_path, out)
-		end
+		table.insert(stack, { axis = node.split, side = 1 })
+		walk(node[1], stack, out)
+		stack[#stack] = { axis = node.split, side = 2 }
+		walk(node[2], stack, out)
+		table.remove(stack)
 	end
 end
 
@@ -72,8 +122,8 @@ local function side_of(path: { Step }, focus: { Step }): string?
 	return nil
 end
 
--- The blocks `want` of the focused one: same tab, split tree order.
-local function side_of_focus(cx: WindowCx, want: string): { number }
+-- The blocks `dir` of the focused one: its tab's split tree, not list order.
+local function side_blocks(cx: WindowCx, dir: string): { number }
 	local focused, tab = keeper(cx)
 	if not focused or not tab then
 		return {}
@@ -93,168 +143,86 @@ local function side_of_focus(cx: WindowCx, want: string): { number }
 	if not focus then
 		return {} -- the focused block is a float, not in the tree
 	end
-	local panes = {}
+	local ids = {}
 	for _, leaf in leaves do
-		if leaf.pane ~= focused and side_of(leaf.path, focus) == want then
-			table.insert(panes, leaf.pane)
+		if leaf.pane ~= focused and side_of(leaf.path, focus) == dir then
+			table.insert(ids, leaf.pane)
 		end
 	end
-	return panes
+	return ids
 end
 
--- `dir` is "left" or "right"; "above" and "below" work the same way.
-local function close_side(cx: WindowCx, dir: string, title: string)
-	local panes = side_of_focus(cx, dir)
+-- The other blocks of the focused one's tab. This matches on the pane's tab,
+-- so a float over that tab goes with it while side_blocks leaves it alone.
+local function other_blocks(cx: WindowCx): { number }
+	local focused, tab = keeper(cx)
+	if not focused or not tab then
+		return {}
+	end
+	local ids = {}
+	for _, p in cx.session:panes() do
+		if p.tab == tab and p.pane ~= focused then
+			table.insert(ids, p.pane)
+		end
+	end
+	return ids
+end
+
+local function close(cx: WindowCx, title: string, panes: { number })
 	if #panes == 0 then
-		cx:toast("info", title, "nothing on that side")
+		cx:toast("info", title, "nothing to close")
 		return
 	end
 	for _, pane in panes do
 		cx.layout:close(pane)
 	end
-	report(cx, title, #panes)
+	cx:toast("info", title, string.format("closed %d block(s)", #panes))
 end
 
-local function close_side_tabs(cx: WindowCx, dir: string, title: string)
-	local _, keep = keeper(cx)
-	if not keep then
-		cx:toast("error", title, "no focused block")
-		return
-	end
-	local session = session_id(cx)
-	local tabs = cx.session:tabs()
-	local here = nil
-	for _, t in tabs do
-		if t.id == keep then
-			here = t.position
-		end
-	end
-	if not here then
-		cx:toast("error", title, "the focused block is not in a tab")
-		return
-	end
-	local panes = cx.session:panes()
-	local closed = 0
-	for _, t in tabs do
-		if t.session == session and t.id ~= keep and (t.position < here) == (dir == "left") then
-			closed += close_panes(cx, panes, -1, t.id)
-		end
-	end
-	report(cx, title, closed)
+-- `targets` runs for the palette's availability check and again for the run,
+-- so it stays a couple of table reads plus, for blocks, one tree walk.
+local function close_command(id: string, title: string, targets: (WindowCx) -> { number })
+	return {
+		id = id,
+		title = title,
+		icon = "x",
+		available = function(cx: WindowCx): boolean
+			return #targets(cx) > 0
+		end,
+		run = function(cx: WindowCx)
+			close(cx, title, targets(cx))
+		end,
+	}
 end
 
-tern.command({
-	id = "close-other-tabs",
-	title = "Close other tabs",
-	icon = "x",
-	available = function(cx)
-		return #cx.session:tabs() > 1
-	end,
-	run = function(cx)
-		local _, keep = keeper(cx)
-		if not keep then
-			cx:toast("error", "Close other tabs", "no focused block")
-			return
-		end
-		local session = session_id(cx)
-		local panes = cx.session:panes()
-		local closed = 0
-		for _, t in cx.session:tabs() do
-			if t.id ~= keep and t.session == session then
-				closed += close_panes(cx, panes, -1, t.id)
-			end
-		end
-		report(cx, "Close other tabs", closed)
-	end,
-})
+tern.command(close_command("close-other-tabs", "Close other tabs", function(cx)
+	return panes_of(cx, other_tabs(cx))
+end))
 
-tern.command({
-	id = "close-left-tabs",
-	title = "Close tabs left",
-	icon = "x",
-	available = function(cx)
-		local _, keep = keeper(cx)
-		for _, t in cx.session:tabs() do
-			if t.id == keep then
-				return t.position > 1
-			end
-		end
-		return false
-	end,
-	run = function(cx)
-		close_side_tabs(cx, "left", "Close tabs left")
-	end,
-})
+tern.command(close_command("close-left-tabs", "Close tabs left", function(cx)
+	return panes_of(cx, side_tabs(cx, "left"))
+end))
 
-tern.command({
-	id = "close-right-tabs",
-	title = "Close tabs right",
-	icon = "x",
-	available = function(cx)
-		local _, keep = keeper(cx)
-		local here, total = nil, 0
-		for _, t in cx.session:tabs() do
-			total += 1
-			if t.id == keep then
-				here = t.position
-			end
-		end
-		return here ~= nil and here < total
-	end,
-	run = function(cx)
-		close_side_tabs(cx, "right", "Close tabs right")
-	end,
-})
+tern.command(close_command("close-right-tabs", "Close tabs right", function(cx)
+	return panes_of(cx, side_tabs(cx, "right"))
+end))
 
-tern.command({
-	id = "close-other-blocks",
-	title = "Close other blocks",
-	icon = "x",
-	available = function(cx)
-		local focused = cx.session:focused()
-		local tab = if focused then cx.session:tab_of(focused) else nil
-		if not tab then
-			return false
-		end
-		local n = 0
-		for _, p in cx.session:panes() do
-			if p.tab == tab then
-				n += 1
-			end
-		end
-		return n > 1
-	end,
-	run = function(cx)
-		local focused, keep = keeper(cx)
-		if not focused or not keep then
-			cx:toast("error", "Close other blocks", "no focused block")
-			return
-		end
-		-- Same tab only; for the whole window pass tab = nil.
-		report(cx, "Close other blocks", close_panes(cx, cx.session:panes(), focused, keep))
-	end,
-})
+tern.command(close_command("close-other-blocks", "Close other blocks", function(cx)
+	return other_blocks(cx)
+end))
 
-tern.command({
-	id = "close-left-blocks",
-	title = "Close blocks left",
-	icon = "x",
-	available = function(cx)
-		return #side_of_focus(cx, "left") > 0
-	end,
-	run = function(cx)
-		close_side(cx, "left", "Close blocks left")
-	end,
-})
+tern.command(close_command("close-left-blocks", "Close blocks left", function(cx)
+	return side_blocks(cx, "left")
+end))
 
-tern.command({
-	id = "close-right-blocks",
-	title = "Close blocks right",
-	icon = "x",
-	available = function(cx)
-		return #side_of_focus(cx, "right") > 0
-	end,
-	run = function(cx)
-		close_side(cx, "right", "Close blocks right")
-	end,
-})
+tern.command(close_command("close-right-blocks", "Close blocks right", function(cx)
+	return side_blocks(cx, "right")
+end))
+
+tern.command(close_command("close-above-blocks", "Close blocks above", function(cx)
+	return side_blocks(cx, "above")
+end))
+
+tern.command(close_command("close-below-blocks", "Close blocks below", function(cx)
+	return side_blocks(cx, "below")
+end))

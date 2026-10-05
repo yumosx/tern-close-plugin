@@ -1,6 +1,6 @@
 # tern-close-plugin
 
-Six Tern commands that close tabs and split blocks around the block you have focused.
+Eight Tern commands that close tabs and split blocks around the block you have focused.
 
 Window half only. Tabs and splits are window state, and the host half of a plugin has no layout access, so there is nothing to run in the daemon.
 
@@ -14,6 +14,10 @@ Window half only. Tabs and splits are window state, and the host half of a plugi
 | `plugin.close-tab.close-other-blocks` | Close other blocks | the other blocks in the focused block's tab |
 | `plugin.close-tab.close-left-blocks` | Close blocks left | the blocks left of it in the split tree |
 | `plugin.close-tab.close-right-blocks` | Close blocks right | the blocks right of it |
+| `plugin.close-tab.close-above-blocks` | Close blocks above | the blocks above it |
+| `plugin.close-tab.close-below-blocks` | Close blocks below | the blocks below it |
+
+Tabs are one ordered list, however the tab bar is drawn (along the top or down the left edge), so tabs only get left and right. Blocks sit in a two-dimensional split tree, so they get all four directions.
 
 Every row is hidden while it would close nothing, so the palette only offers a command that does something.
 
@@ -49,16 +53,15 @@ tern.bind("cmd+alt+right", "plugin.close-tab.close-right-blocks")
 
 **It is destructive.** Every command closes panes with `cx.layout:close`, the raw session close that plugins get. Programs in those panes end immediately, there is no confirmation, and the palette does not tint these rows the way it tints the built-in `close_pane`.
 
-**Tab commands stay inside one session.** `close_tab` is per session, so `session_id` in `window.luau` reads the current session and skips the rest. Drop that check to sweep every session.
+**One `targets` per command.** Each registration is a `close_command` that takes a function returning the pane ids to close. That same function answers the palette's availability check, so a row can only appear when its own run would find something, and the two cannot drift apart.
 
-**Block commands stay in the focused tab.** `close-other-blocks` passes the tab id to `close_panes`; passing `nil` closes every other block in the window instead.
+**Tab commands stay inside one session.** `close_tab` is per session, so `session_id` in `window.luau` reads the current session and every comparison filters on `t.session`. Drop those checks to sweep every session.
 
-**Left and right come from the split tree, not from a list.** `side_of_focus` walks `cx.session:layout(tab).root` and tags each leaf with the split decisions above it. Two leaves are compared at the first split where their paths diverge: under a `"right"` split, side 1 is left of side 2; under a `"down"` split, side 1 is above side 2. So a horizontal row of splits closes the way you expect, a vertical stack is not "left" and stays open. Vertical commands are one registration away:
+**Block commands stay in the focused tab.** `other_blocks` matches on the pane's tab id; widen it to every tab and `close-other-blocks` closes around the focused block in the whole window.
 
-```lua
-close_side(cx, "above", "Close blocks above")
-close_side(cx, "below", "Close blocks below")
-```
+**Block directions come from the split tree, not from a list.** `side_blocks` walks `cx.session:layout(tab).root` and tags each leaf with the split decisions above it. Two leaves are compared at the first split where their paths diverge: under a `"right"` split, side 1 is left of side 2; under a `"down"` split, side 1 is above side 2. So a horizontal row closes left and right the way you expect, a vertical stack closes above and below, and a vertical stack is never swept up as "left". The walk clones one path per leaf, not one per level.
+
+**Positions are per session.** `TabInfo.position` counts tabs within its own session and `cx.session:tabs()` returns tabs of every session, so every comparison here filters on `t.session` first, including the `available` checks.
 
 **Floating blocks are not in the split tree.** The side commands leave them alone. `close-other-blocks` matches on the pane's tab id, so it closes floats along with the tab.
 
@@ -88,5 +91,5 @@ So these commands live in the palette and in key bindings.
 ## Files
 
 - `plugin.toml` — manifest, window entry only
-- `window.luau` — the six commands and their shared helpers
+- `window.luau` — the eight commands and their shared helpers
 - `tern.d.luau` — generated API type definitions
